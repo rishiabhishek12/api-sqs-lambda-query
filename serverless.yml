@@ -1,0 +1,136 @@
+service: api-gateway-sqs
+
+provider:
+  name: aws
+  runtime: python3.8
+  region: us-east-1
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - lambda:InvokeFunction
+      Resource: "*"
+      Principal:
+        Service: sqs.amazonaws.com
+
+resources:
+  Resources:
+    ApiGatewaySQSQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: apigateway-queues
+        DelaySeconds: 0
+        MaximumMessageSize: 262144
+        MessageRetentionPeriod: 86400
+        ReceiveMessageWaitTimeSeconds: 10
+
+    ApiGatewayRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: apigateway_sqs
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: apigateway.amazonaws.com
+              Action: sts:AssumeRole
+
+    ApiGatewayPolicy:
+      Type: AWS::IAM::Policy
+      Properties:
+        PolicyName: api-sqs-cloudwatch-policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt ApiGatewaySQSQueue.Arn
+        Roles:
+          - !Ref ApiGatewayRole
+
+    LambdaExecutionRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: lambda-lambda-db
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+
+    LambdaSQSPolicy:
+      Type: AWS::IAM::Policy
+      Properties:
+        PolicyName: lambda_policy_db
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:ReceiveMessage
+                - sqs:DeleteMessage
+                - sqs:GetQueueAttributes
+              Resource: !GetAtt ApiGatewaySQSQueue.Arn
+        Roles:
+          - !Ref LambdaExecutionRole
+
+    ApiGatewayRestApi:
+      Type: AWS::ApiGateway::RestApi
+      Properties:
+        Name: api-gateway-SQS
+        Description: POST records to SQS queue
+
+    ApiGatewayResourceFormScore:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+        PathPart: form-score
+        RestApiId: !Ref ApiGatewayRestApi
+
+    ApiGatewayMethodFormScore:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        AuthorizationType: NONE
+        HttpMethod: POST
+        ResourceId: !Ref ApiGatewayResourceFormScore
+        RestApiId: !Ref ApiGatewayRestApi
+        Integration:
+          IntegrationHttpMethod: POST
+          Type: AWS_PROXY
+          Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${self:custom.lambdaFunctionArn}/invocations
+          PassthroughBehavior: WHEN_NO_TEMPLATES
+
+    ApiGatewayDeployment:
+      Type: AWS::ApiGateway::Deployment
+      Properties:
+        RestApiId: !Ref ApiGatewayRestApi
+        StageName: prod
+      DependsOn:
+        - ApiGatewayMethodFormScore
+
+functions:
+  lambdaSQS:
+    handler: handler.lambda_handler
+    timeout: 30
+    memorySize: 128
+    role: !GetAtt LambdaExecutionRole.Arn
+    environment:
+      SQS_QUEUE_URL: !Ref ApiGatewaySQSQueue
+    events:
+      - http:
+          path: form-score
+          method: post
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - ApiGatewaySQSQueue
+              - Arn
+
+custom:
+  lambdaFunctionArn:
+    Fn::GetAtt:
+      - LambdaFunction
+      - Arn
